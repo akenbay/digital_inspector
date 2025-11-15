@@ -9,6 +9,7 @@ from ultralytics import YOLO
 import os
 import tempfile
 from pathlib import Path
+import fitz  # PyMuPDF
 
 app = FastAPI(title="Document Processing API")
 
@@ -51,17 +52,47 @@ async def startup_event():
 def convert_document_to_image(file_content: bytes, filename: str) -> np.ndarray:
     """Convert uploaded document to image format for YOLO processing."""
     try:
-        # Try to read as image
-        nparr = np.frombuffer(file_content, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img is None:
-            # If not an image, try opening with PIL
-            pil_image = Image.open(io.BytesIO(file_content))
+        # Check if it's a PDF file
+        if filename.lower().endswith('.pdf'):
+            # Convert PDF to image using PyMuPDF
+            pdf_document = fitz.open(stream=file_content, filetype="pdf")
+            
+            if len(pdf_document) == 0:
+                raise HTTPException(status_code=400, detail="PDF file is empty")
+            
+            # Process the first page (or you can process all pages)
+            page = pdf_document[0]
+            
+            # Render page to a pixmap (image)
+            mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
+            pix = page.get_pixmap(matrix=mat)
+            
+            # Convert pixmap to PIL Image
+            img_data = pix.tobytes("ppm")
+            pil_image = Image.open(io.BytesIO(img_data))
+            
             # Convert PIL image to OpenCV format
             img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-        
-        return img
+            
+            pdf_document.close()
+            return img
+        else:
+            # Try to read as image
+            nparr = np.frombuffer(file_content, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if img is None:
+                # If not decoded as image, try opening with PIL
+                pil_image = Image.open(io.BytesIO(file_content))
+                # Convert RGBA to RGB if necessary
+                if pil_image.mode == 'RGBA':
+                    pil_image = pil_image.convert('RGB')
+                # Convert PIL image to OpenCV format
+                img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            
+            return img
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error converting document to image: {str(e)}")
 
@@ -121,7 +152,9 @@ async def upload_document(file: UploadFile = File(...)):
         
         # Save processed image to temporary file
         temp_dir = tempfile.gettempdir()
-        output_filename = f"processed_{file.filename}"
+        # Replace PDF extension with jpg extension for output
+        base_filename = os.path.splitext(file.filename)[0]
+        output_filename = f"processed_{base_filename}.jpg"
         output_path = os.path.join(temp_dir, output_filename)
         
         # Encode image to JPEG format
